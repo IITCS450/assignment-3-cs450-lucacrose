@@ -19,6 +19,14 @@ extern void forkret(void);
 extern void trapret(void);
 
 static void wakeup1(void *chan);
+static uint randstate = 1;
+
+static uint
+randlcg(void)
+{
+  randstate = randstate * 1664525 + 1013904223;
+  return randstate;
+}
 
 void
 pinit(void)
@@ -88,6 +96,7 @@ allocproc(void)
 found:
   p->state = EMBRYO;
   p->pid = nextpid++;
+  p->tickets = 1;
 
   release(&ptable.lock);
 
@@ -198,6 +207,7 @@ fork(void)
   }
   np->sz = curproc->sz;
   np->parent = curproc;
+  np->tickets = curproc->tickets;
   *np->tf = *curproc->tf;
 
   // Clear %eax so that fork returns 0 in the child.
@@ -324,32 +334,56 @@ scheduler(void)
 {
   struct proc *p;
   struct cpu *c = mycpu();
+  int total;
+  uint winner;
+  int running;
   c->proc = 0;
   
   for(;;){
     // Enable interrupts on this processor.
     sti();
 
-    // Loop over process table looking for process to run.
     acquire(&ptable.lock);
+
+    total = 0;
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-      if(p->state != RUNNABLE)
-        continue;
-
-      // Switch to chosen process.  It is the process's job
-      // to release ptable.lock and then reacquire it
-      // before jumping back to us.
-      c->proc = p;
-      switchuvm(p);
-      p->state = RUNNING;
-
-      swtch(&(c->scheduler), p->context);
-      switchkvm();
-
-      // Process is done running for now.
-      // It should have changed its p->state before coming back.
-      c->proc = 0;
+      if(p->state == RUNNABLE)
+        total += p->tickets;
     }
+
+    if(total > 0){
+      winner = randlcg() % total;
+      running = 0;
+      total = 0;
+      for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+        if(p->state != RUNNABLE)
+          continue;
+
+        total += p->tickets;
+        if(total <= winner)
+          continue;
+
+        // Switch to chosen process.  It is the process's job
+        // to release ptable.lock and then reacquire it
+        // before jumping back to us.
+        c->proc = p;
+        switchuvm(p);
+        p->state = RUNNING;
+
+        swtch(&(c->scheduler), p->context);
+        switchkvm();
+
+        // Process is done running for now.
+        // It should have changed its p->state before coming back.
+        c->proc = 0;
+        running = 1;
+        break;
+      }
+
+      if(running == 0)
+        panic("scheduler: no runnable winner");
+    }
+
     release(&ptable.lock);
 
   }
@@ -494,6 +528,21 @@ kill(int pid)
   }
   release(&ptable.lock);
   return -1;
+}
+
+int
+settickets(int n)
+{
+  struct proc *p;
+
+  if(n < 1)
+    return -1;
+
+  p = myproc();
+  acquire(&ptable.lock);
+  p->tickets = n;
+  release(&ptable.lock);
+  return 0;
 }
 
 //PAGEBREAK: 36
